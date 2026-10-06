@@ -27,7 +27,20 @@ async function cloudSave(next){
 let sentEmail='',otpBusy=false,resendUntil=0,resendTimer=null;
 function updateResend(){const remaining=Math.max(0,Math.ceil((resendUntil-Date.now())/1000));$('resend-code').disabled=otpBusy||remaining>0;$('resend-code').textContent=remaining?'重新发送（'+remaining+' 秒）':'重新发送验证码';}
 function resetOtp(){sentEmail='';$('otp-step').hidden=true;$('email-step').hidden=false;$('email').readOnly=false;$('otp-code').value='';$('otp-description').textContent='';if(resendTimer)clearInterval(resendTimer);resendTimer=null;}
-function otpError(error){if(error.code==='over_email_send_rate_limit'||error.status===429)return '发送太频繁，请稍后再试。';if(error.code==='otp_expired'||error.code==='validation_failed')return '验证码不正确或已过期，请检查最新邮件或重新发送。';if(error.code==='email_address_not_authorized')return '邮件服务暂不支持这个收件人，请联系网站维护者配置发信服务。';return '操作未成功，请检查网络，或稍后再试。';}
+function otpError(error){
+ const code=typeof error.code==='string'&&/^[a-z0-9_]{1,80}$/.test(error.code)?error.code:'';
+ const status=Number.isInteger(error.status)?error.status:0;
+ const reference=code?'（错误编号：'+code+'）':status?'（HTTP '+status+'）':'';
+ if(code==='over_email_send_rate_limit'||code==='over_request_rate_limit'||status===429)return '验证码发送次数或频率达到限制，请稍后再试。'+reference;
+ if(code==='otp_expired')return '验证码不正确或已过期，请检查最新邮件或重新发送。';
+ if(code==='email_address_not_authorized')return '发信服务限制了收件人，网站维护者需要检查自定义 SMTP 是否生效。'+reference;
+ if(code==='email_address_invalid')return '请检查邮箱地址是否完整、正确。';
+ if(code==='signup_disabled'||code==='otp_disabled')return '网站暂未允许这个账号注册或使用验证码，请联系维护者。'+reference;
+ if(code==='captcha_failed')return '账号服务要求人机验证，但网页还未接入验证组件，请联系维护者。'+reference;
+ if(status>=500||code==='unexpected_failure')return '认证服务处理失败，请网站维护者检查 SMTP 发信和认证日志。'+reference;
+ if(error.name==='AuthRetryableFetchError'||error.name==='TypeError'||/failed to fetch|network|load failed/i.test(error.message||''))return '未能连接账号服务。请用手机自带浏览器打开，或切换 Wi-Fi／移动网络再试。'+reference;
+ return '验证码请求未成功，请把这条提示反馈给网站维护者。'+(reference||'（错误编号：unknown）');
+}
 async function sendOtp(){
  if(otpBusy)return;if(!cloudClient){showAuthMessage('账号服务尚未配置。');return;}
  if(!sentEmail&&!$('email').reportValidity())return;if(sentEmail&&Date.now()<resendUntil)return;
