@@ -24,20 +24,28 @@ async function cloudSave(next){
  const result=await query;if(epoch!==cloudEpoch)return false;if(result.error)throw Error(result.error.code==='23505'?'其他设备已更新记录，请先保留输入内容再刷新。':'保存失败，请检查网络，输入内容已保留。');if(!result.data)throw Error('其他设备已更新记录，请先保留输入内容再刷新。');cloudRevision=result.data.revision;state=next;render();return true;
  }catch(error){$('status').textContent=error.message;showAuthMessage(error.message);return false;}finally{cloudBusy=false;cloudControls(ready&&Boolean(cloudUser));}
 }
-async function authAction(mode){
- if(!cloudClient){showAuthMessage('账号服务尚未配置，暂时不能注册或登录。');return;}
- const form=$('auth-form');if(!form.reportValidity())return;const email=$('email').value.trim(),password=$('password').value;
- if(password.length<8){showAuthMessage('密码至少需要 8 个字符。');return;}const buttons=authDialog.querySelectorAll('button');buttons.forEach(b=>b.disabled=true);showAuthMessage('正在处理…');
- try{let result;if(mode==='register')result=await cloudClient.auth.signUp({email,password,options:{emailRedirectTo:location.origin+location.pathname}});else result=await cloudClient.auth.signInWithPassword({email,password});
- if(result.error){const code=result.error.code;throw Error(code==='invalid_credentials'?'邮箱或密码不正确。':code==='email_not_confirmed'?'请先通过邮箱中的链接验证邮箱。':code==='over_email_send_rate_limit'?'验证邮件发送过于频繁，请稍后重试。':'操作未成功，请检查邮箱、密码或稍后重试。');}
- $('password').value='';if(mode==='register'&&!result.data.session)showAuthMessage('如果注册成功，邮箱将收到验证邮件。完成验证后再登录。');else await loadCloudSession();
- }catch(error){showAuthMessage(error.message);}finally{buttons.forEach(b=>b.disabled=false);}
+let sentEmail='',otpBusy=false,resendUntil=0,resendTimer=null;
+function updateResend(){const remaining=Math.max(0,Math.ceil((resendUntil-Date.now())/1000));$('resend-code').disabled=otpBusy||remaining>0;$('resend-code').textContent=remaining?'重新发送（'+remaining+' 秒）':'重新发送验证码';}
+function resetOtp(){sentEmail='';$('otp-step').hidden=true;$('email-step').hidden=false;$('email').readOnly=false;$('otp-code').value='';$('otp-description').textContent='';if(resendTimer)clearInterval(resendTimer);resendTimer=null;}
+function otpError(error){if(error.code==='over_email_send_rate_limit'||error.status===429)return '发送太频繁，请稍后再试。';if(error.code==='otp_expired'||error.code==='validation_failed')return '验证码不正确或已过期，请检查最新邮件或重新发送。';if(error.code==='email_address_not_authorized')return '邮件服务暂不支持这个收件人，请联系网站维护者配置发信服务。';return '操作未成功，请检查网络，或稍后再试。';}
+async function sendOtp(){
+ if(otpBusy)return;if(!cloudClient){showAuthMessage('账号服务尚未配置。');return;}
+ if(!sentEmail&&!$('email').reportValidity())return;if(sentEmail&&Date.now()<resendUntil)return;
+ const email=sentEmail||$('email').value.trim();otpBusy=true;$('send-code').disabled=true;updateResend();showAuthMessage('正在发送验证码…');
+ try{const {error}=await cloudClient.auth.signInWithOtp({email,options:{shouldCreateUser:true}});if(error)throw error;sentEmail=email;$('email').readOnly=true;$('email-step').hidden=true;$('otp-step').hidden=false;$('otp-description').textContent='验证码已发送至 '+email+'。请查看最新邮件，也可以检查垃圾箱。';$('otp-code').value='';$('otp-code').focus();resendUntil=Date.now()+60000;if(resendTimer)clearInterval(resendTimer);resendTimer=setInterval(updateResend,1000);showAuthMessage('填写邮件里的数字验证码，无需点击链接。');}
+ catch(error){showAuthMessage(otpError(error));}finally{otpBusy=false;$('send-code').disabled=false;updateResend();}
 }
-$('auth-form').addEventListener('submit',e=>{e.preventDefault();authAction('login')});$('register').addEventListener('click',()=>authAction('register'));$('open-account').addEventListener('click',()=>{showAuthMessage(cloudUser?'当前已登录，可以退出后切换账号。':'登录后查看你的回忆树。');authDialog.showModal()});
-$('logout').addEventListener('click',async()=>{if(!cloudClient||cloudBusy)return;const {error}=await cloudClient.auth.signOut();if(error){showAuthMessage('退出失败，请稍后重试。');return;}cloudEpoch++;clearCloudView();$('logout').hidden=true;showAuthMessage('已退出登录。');authDialog.showModal()});
+async function verifyCode(){
+ if(otpBusy||!sentEmail)return;const token=$('otp-code').value.trim();if(!/^\d{6,10}$/.test(token)){showAuthMessage('请填写邮件中的完整数字验证码。');return;}
+ otpBusy=true;$('verify-code').disabled=true;$('change-email').disabled=true;updateResend();showAuthMessage('正在验证…');
+ try{const {data,error}=await cloudClient.auth.verifyOtp({email:sentEmail,token,type:'email'});if(error)throw error;if(!data.session)throw Error('missing session');resetOtp();await loadCloudSession();}
+ catch(error){showAuthMessage(otpError(error));}finally{otpBusy=false;$('verify-code').disabled=false;$('change-email').disabled=false;updateResend();}
+}
+$('auth-form').addEventListener('submit',e=>{e.preventDefault();sendOtp()});$('otp-form').addEventListener('submit',e=>{e.preventDefault();verifyCode()});$('resend-code').addEventListener('click',sendOtp);$('change-email').addEventListener('click',()=>{resetOtp();showAuthMessage('重新填写邮箱后发送验证码。');});$('open-account').addEventListener('click',()=>{showAuthMessage(cloudUser?'当前已登录，可以退出后切换账号。':'用邮箱验证码进入，无需密码。');$('auth-form').hidden=Boolean(cloudUser);if(cloudUser)$('otp-step').hidden=true;authDialog.showModal()});
+$('logout').addEventListener('click',async()=>{if(!cloudClient||cloudBusy)return;const {error}=await cloudClient.auth.signOut();if(error){showAuthMessage('退出失败，请稍后重试。');return;}cloudEpoch++;clearCloudView();resetOtp();$('auth-form').hidden=false;$('logout').hidden=true;showAuthMessage('已退出登录。');authDialog.showModal()});
 $('retry-cloud').addEventListener('click',()=>cloudClient?loadCloudSession():showAuthMessage('账号服务尚未配置。'));
 async function initCloud(){clearCloudView();const c=window.MEMORY_CLOUD_CONFIG;
  if(!c?.url||!c?.publishableKey||!window.supabase){showAuthMessage('账号服务尚未配置，此版本不能注册或登录。');authDialog.showModal();return;}
- try{const url=new URL(c.url);if(url.protocol!=='https:')throw Error('invalid');cloudClient=window.supabase.createClient(c.url,c.publishableKey);cloudClient.auth.onAuthStateChange(event=>{if(event==='SIGNED_OUT'){cloudEpoch++;clearCloudView();$('logout').hidden=true;if(!authDialog.open)authDialog.showModal();}if(event==='SIGNED_IN')setTimeout(()=>loadCloudSession(),0);});await loadCloudSession();}catch(error){showAuthMessage('账号服务配置无效，请检查配置。');authDialog.showModal();}
+ try{const url=new URL(c.url);if(url.protocol!=='https:')throw Error('invalid');cloudClient=window.supabase.createClient(c.url,c.publishableKey);cloudClient.auth.onAuthStateChange(event=>{if(event==='SIGNED_OUT'){cloudEpoch++;clearCloudView();resetOtp();$('auth-form').hidden=false;$('logout').hidden=true;if(!authDialog.open)authDialog.showModal();}if(event==='SIGNED_IN')setTimeout(()=>loadCloudSession(),0);});await loadCloudSession();}catch(error){showAuthMessage('账号服务配置无效，请检查配置。');authDialog.showModal();}
 }
 initCloud();
